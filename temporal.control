@@ -1,0 +1,4 @@
+# temporal extension
+comment = 'Functions needed for enabling temporal support'
+default_version = '1.0'
+relocatable = true
