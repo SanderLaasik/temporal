@@ -228,142 +228,73 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION TEMPORAL.COLLAPSE(Param_Intervals DATERANGE[]) RETURNS TABLE (Duration_Column DATERANGE) AS $$
 	DECLARE
 		v_num_tot_intervals INTEGER;
-		v_running_non_coll INTEGER;
-		v_running_coll INTEGER;
-
+		v_running_coll_index INTEGER;
+		v_running_non_coll_index INTEGER;
 		v_running_collapsed DATERANGE;
 		v_running_non_collapsed DATERANGE;
+		v_non_collapsed ALIAS FOR $1;
+		v_collapsed DATERANGE[] DEFAULT '{}';
 	BEGIN
-		CREATE TABLE NON_COLLAPSED AS 
-		SELECT UNNEST(Param_Intervals) AS Duration_Column, ROW_NUMBER() OVER (ORDER BY UNNEST(Param_Intervals)) AS RN;
 
-		v_num_tot_intervals := (SELECT COUNT(*) FROM NON_COLLAPSED);
-		v_running_coll := 1;
-		v_running_non_coll := 1;
+		v_num_tot_intervals := array_length(v_non_collapsed, 1);
+		v_running_coll_index := 1;
+		v_running_non_coll_index := 1;
 
-		CREATE TABLE COLLAPSED (Collapsed_Row_No INTEGER, Duration_Column DATERANGE, Non_Collapsed_Row_No INTEGER);
+		SELECT array_append(v_collapsed, v_non_collapsed[1]) INTO v_collapsed;
 		
+		WHILE v_running_coll_index<=v_num_tot_intervals LOOP
+			v_running_collapsed := v_collapsed[v_running_coll_index];
 
-		WHILE v_running_coll<=v_num_tot_intervals LOOP
-			INSERT INTO COLLAPSED (
-				Collapsed_Row_No, 
-				Duration_Column, 
-				Non_Collapsed_Row_No)
-			VALUES (
-				v_running_coll, 
-				(SELECT NON_COLLAPSED.Duration_Column FROM NON_COLLAPSED WHERE RN=v_running_coll),
-				v_running_non_coll
-			);
-			WHILE v_running_non_coll<=v_num_tot_intervals LOOP
-				v_running_collapsed := (
-					SELECT COLLAPSED.Duration_Column
-					FROM COLLAPSED
-					WHERE COLLAPSED.Collapsed_Row_No=v_running_coll
-					AND COLLAPSED.Non_Collapsed_Row_No=v_running_non_coll-1
-				);
-
-				v_running_non_collapsed := (
-					SELECT NON_COLLAPSED.Duration_Column
-					FROM NON_COLLAPSED
-					WHERE RN=v_running_non_coll
-				);
+			WHILE v_running_non_coll_index<=v_num_tot_intervals LOOP
+				v_running_non_collapsed := v_non_collapsed[v_running_non_coll_index];
 
 				IF (TEMPORAL.UNION(v_running_collapsed, v_running_non_collapsed)<>'Empty') THEN
-					INSERT INTO COLLAPSED (
-						Collapsed_Row_No, 
-						Duration_Column, 
-						Non_Collapsed_Row_No)
-					SELECT
-						v_running_coll, 
-						TEMPORAL.UNION(v_running_collapsed, v_running_non_collapsed),
-						v_running_non_coll
-					FROM NON_COLLAPSED AS NC
-					WHERE NC.RN=v_running_non_coll
-					AND NOT EXISTS (
-						SELECT 1
-						FROM COLLAPSED X
-						WHERE X.Duration_Column=NC.Duration_Column
-					);
-
-					DELETE
-					FROM COLLAPSED
-					WHERE COLLAPSED.Collapsed_Row_No=v_running_coll
-					AND COLLAPSED.Non_Collapsed_Row_No=v_running_non_coll-1;
-
+						v_collapsed[v_running_coll_index]:=TEMPORAL.UNION(v_running_collapsed, v_running_non_collapsed);
+						v_running_non_coll_index:=v_running_non_coll_index+1;
+					ELSE
+						v_collapsed[v_running_non_coll_index]:= v_running_non_collapsed;
+						EXIT;
 				END IF;
-				v_running_non_coll = v_running_non_coll+1;
 			END LOOP;
-			v_running_coll = (SELECT MAX(COLLAPSED.Non_Collapsed_Row_No)+1 FROM COLLAPSED);
-			v_running_non_coll = v_running_coll;
+			v_running_coll_index:=v_running_coll_index+1;
 		END LOOP;
 
-
 		RETURN QUERY
-		SELECT COLLAPSED.Duration_Column FROM COLLAPSED;
-
-		DROP TABLE COLLAPSED;
-		DROP TABLE NON_COLLAPSED;
+		SELECT Duration FROM (SELECT UNNEST(v_collapsed) AS Duration) SUB WHERE Duration IS NOT NULL;
         END;
 $$ LANGUAGE plpgsql;
+
+
 
 CREATE OR REPLACE FUNCTION TEMPORAL.EXPAND(Param_Intervals DATERANGE[]) RETURNS TABLE (Unit_Interval DATERANGE) AS $$
 	DECLARE
-		v_num_tot_intervals INTEGER;
-		v_running_interval_no INTEGER;
-		v_running_interval DATERANGE;
-		v_interval_start DATE; 
-		v_interval_end DATE;
+		v_min_date DATE;
+		v_max_date DATE;
+		v_days_count INTEGER;
 	BEGIN
-		CREATE TEMPORARY TABLE NON_EXPANDED AS 
-		SELECT UNNEST(Param_Intervals) AS Duration_Column, ROW_NUMBER() OVER (ORDER BY UNNEST(Param_Intervals)) AS RN;
 
-
-		--IF EXISTS (
-		--	SELECT 1 
-		--	FROM NON_EXPANDED 
-		--	WHERE TEMPORAL.END(Duration_Column)='INFINITY'
-		--) THEN RAISE EXCEPTION 'Ranges with INFINITY are not allowed';
-		--END IF;
-
-		CREATE TEMPORARY TABLE EXPANDED_FORM (Unit_Interval DATERANGE);
-
-		v_num_tot_intervals := (SELECT COUNT(*) FROM NON_EXPANDED);
-		v_running_interval_no := 1;
-
-		WHILE v_running_interval_no<=v_num_tot_intervals LOOP
-			v_running_interval := (
-				SELECT Duration_Column 
-				FROM NON_EXPANDED 
-				WHERE RN=v_running_interval_no
-			);
-			v_interval_start := TEMPORAL.BEGIN(v_running_interval);
-			v_interval_end := TEMPORAL.END(v_running_interval);
-			IF v_interval_end='INFINITY' THEN
-				v_interval_end:=CURRENT_DATE;
-			END IF;
-
-			WHILE v_interval_start<=v_interval_end LOOP
-	    		INSERT INTO EXPANDED_FORM (Unit_Interval) 
-				VALUES (DATERANGE ('['||v_interval_start||','||v_interval_start||']'));
-				v_interval_start = v_interval_start + 1;
-			END LOOP;
-			v_running_interval_no = v_running_interval_no+1;
-		END LOOP;
+		SELECT 
+			MIN(TEMPORAL.BEGIN(Duration_Column)), 
+			MAX(
+				CASE WHEN TEMPORAL.END(Duration_Column)='INFINITY' THEN CURRENT_DATE ELSE TEMPORAL.END(Duration_Column) END
+			)
+		INTO v_min_date, v_max_date
+		FROM (SELECT UNNEST(Param_Intervals) AS Duration_Column) AS NON_EXPANDED;
+		v_days_count := v_max_date - v_min_date;
 
 		RETURN QUERY 
-		SELECT DISTINCT EXPANDED_FORM.Unit_Interval 
-		FROM EXPANDED_FORM ORDER BY EXPANDED_FORM.Unit_Interval;
-		DROP TABLE NON_EXPANDED;
-		DROP TABLE EXPANDED_FORM;
+		SELECT DISTINCT CAST('['||CALENDAR.Calendar_Date||','||CALENDAR.Calendar_Date||']' AS DATERANGE)
+		FROM (
+			SELECT v_min_date + S.A AS Calendar_Date 
+			FROM generate_series(0,v_days_count,1) AS S(A)
+		) AS CALENDAR
+		WHERE TEMPORAL.CONTAINED_IN(
+			CALENDAR.Calendar_Date, 
+			(SELECT UNNEST(Param_Intervals) AS Duration_Column)
+		);
+
         END;
 $$ LANGUAGE plpgsql;
-
-/*
-Statement1 - 1st statement
-Statement2 - 2nd statement
-Grouping columns - list of columns the COLLAPSE is grouped by. If Range column is the only one resultset then leave "Grouping columns" empty ('') or NULL
-Range column - columnt that is used as parameter of COLLAPSE
-*/
 
 CREATE OR REPLACE FUNCTION TEMPORAL.TEMPORAL_EQUALS(
 	Statement1 TEXT, 
@@ -377,41 +308,34 @@ CREATE OR REPLACE FUNCTION TEMPORAL.TEMPORAL_EQUALS(
 		v_Group_By TEXT;
 		v_Order_By TEXT;
 		v_Result BOOLEAN;
-	BEGIN
-		PERFORM TEMPORAL.PREPARE_TEMP(Statement1, 1); --INPUT_TEMP1
-		PERFORM TEMPORAL.PREPARE_TEMP(Statement2, 2); --INPUT_TEMP2
-		
+	BEGIN		
 		IF Grouping_Columns IS NULL OR CHAR_LENGTH(Grouping_Columns)=0 THEN 
 			v_Select_List := '';
 			v_Group_By := '';
 			v_Order_By := '';
 		ELSE
 			v_Select_List := Grouping_Columns||', ';
-			v_Group_By := 'GROUP BY '||Grouping_Columns;
-			v_Order_By := 'ORDER BY '||Grouping_Columns;
+			v_Group_By := format('GROUP BY %s', Grouping_Columns);
+			v_Order_By := format('ORDER BY %s', Grouping_Columns);
 		END IF;
 
-		EXECUTE '
+		EXECUTE format('
 		SELECT COALESCE((
 			SELECT COALESCE(ARRAY_TO_STRING(ARRAY_AGG(ROW(SUB1.*)), '',''), ''NO ROWS RETURNED'')
 			FROM (
-				SELECT '||v_Select_List||'TEMPORAL.EXPAND(ARRAY_AGG('||Range_Column||')) AS '||Range_Column||'
-				FROM INPUT_TEMP1 
-				'||v_Group_By||'
-				'||v_Order_By||'
+				SELECT %s TEMPORAL.EXPAND(ARRAY_AGG(%s)) AS %s
+				FROM (%s) AS STMT_TEMP1 
+				%s %s
 			) SUB1
 		) = (
 			SELECT COALESCE(ARRAY_TO_STRING(ARRAY_AGG(ROW(SUB2.*)), '',''), ''NO ROWS RETURNED'')
 			FROM (
-				SELECT '||v_Select_List||'TEMPORAL.EXPAND(ARRAY_AGG('||Range_Column||')) AS '||Range_Column||'
-				FROM INPUT_TEMP2
-				'||v_Group_By||'
-				'||v_Order_By||'
+				SELECT %s TEMPORAL.EXPAND(ARRAY_AGG(%s)) AS %s
+				FROM (%s) AS STMT_TEMP2
+				%s %s
 			) SUB2
-		), FALSE)' INTO v_Result;
+		), FALSE)', v_Select_List, Range_Column, Range_Column, Statement1, v_Group_By, v_Order_By, v_Select_List, Range_Column, Range_Column, Statement2, v_Group_By, v_Order_By) INTO v_Result;
 
-		DROP TABLE INPUT_TEMP1;
-		DROP TABLE INPUT_TEMP2;
 		RETURN v_Result;
         END;
 $$ LANGUAGE plpgsql;
@@ -1059,7 +983,10 @@ DECLARE
 	v_DURING_Table_Name TEXT;
 	v_Record RECORD;
 	v_SINCE_Table_Rows TEXT;
+	v_DURING_Table_Rows TEXT;
+	v_Main_DURING_Table_Rows TEXT;
 	v_Main_PK_Col_List TEXT;
+	v_Result BOOLEAN;
 BEGIN
 	v_Schema_Name := TG_TABLE_SCHEMA;
 
@@ -1072,39 +999,39 @@ BEGIN
 
 	--1.) select row values
 	v_SINCE_Table_Rows:=format('
-		SELECT %s, CAST(''[''||%I||'', ''||TEMPORAL.PRIOR_DATE(%I)||'']'' AS DATERANGE) AS DURING
+		SELECT %s, CAST(''''[''''||%I||'''', ''''||TEMPORAL.PRIOR_DATE(%I)||'''']'''' AS DATERANGE) AS DURING
 		FROM %I.%I
 		WHERE %I<%I
 		', v_Main_PK_Col_List, v_Main_SINCE_Column_Name, v_SINCE_Column_Name, v_Schema_Name, v_SINCE_Table_Name, v_Main_SINCE_Column_Name, v_SINCE_Column_Name
 	);
 	
 	--2.) select from main DURING table
-	EXECUTE format(
-		'CREATE TEMPORARY TABLE QUERY1 AS (SELECT %s, DURING FROM %I.%I AS T1 UNION %s)'
+	v_Main_DURING_Table_Rows:= format(
+		'SELECT %s, DURING FROM %I.%I AS T1 UNION %s'
 		, v_Main_PK_Col_List, v_Schema_Name, v_Main_DURING_Table_Name, v_SINCE_Table_Rows
 	);
 
 	--3.) select from property DURING table
-	EXECUTE format(
-		'CREATE TEMPORARY TABLE QUERY2 AS (SELECT %s, DURING FROM %I.%I AS T2)'
+	v_DURING_Table_Rows:= format(
+		'SELECT %s, DURING FROM %I.%I AS T2'
 		, v_Main_PK_Col_List, v_Schema_Name, v_DURING_Table_Name
 	);
 
 	--4.) combine the 2 queries into function TEMPORAL_EQUALS to compare them
 	--Check if the new SINCE would be less or equal than DURING in hist table
-	IF (
-		SELECT TEMPORAL.TEMPORAL_EQUALS(
-		'SELECT * FROM QUERY1', 
-		'SELECT * FROM QUERY2', 
+	EXECUTE format(
+		'SELECT TEMPORAL.TEMPORAL_EQUALS(
+		''SELECT * FROM (%s) AS QUERY1'', 
+		''SELECT * FROM (%s) AS QUERY2'', 
 		NULL, 
-		'DURING'
-		) AS Res
-	) IS FALSE THEN
+		''DURING''
+		)'
+	,v_Main_DURING_Table_Rows, v_DURING_Table_Rows) INTO v_Result;
+
+	IF v_Result IS FALSE THEN
 	    RAISE EXCEPTION 'Entity and its attribute have some gaps in their relationship: %.%', v_SINCE_Table_Name, v_SINCE_Column_Name;
 	END IF;
 
-	DROP TABLE QUERY1;
-	DROP TABLE QUERY2;
 	RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
@@ -1118,8 +1045,11 @@ DECLARE
 	v_Main_SINCE_Column_Name TEXT;
 	v_Main_DURING_Table_Name TEXT;
 	v_Main_PK_Col_List TEXT;
-	v_Main_SINCE_Table_Rows TEXT;
 	v_Record RECORD;
+
+	v_DURING_Table_Rows TEXT;
+	v_Main_SINCE_Table_Rows TEXT;
+	v_Main_DURING_Table_Rows TEXT;
 BEGIN
 	v_Schema_Name := TG_TABLE_SCHEMA;
 	v_DURING_Table_Name := TG_ARGV[0];
@@ -1130,8 +1060,8 @@ BEGIN
 	v_Main_PK_Col_List := TG_ARGV[5];
 
 	--1.) select from property DURING table
-	EXECUTE format(
-		'CREATE TEMPORARY TABLE QUERY1 AS (SELECT %s, DURING FROM %I.%I AS T2)'
+	v_DURING_Table_Rows:=format(
+		'SELECT %s, DURING FROM %I.%I AS T2'
 		, v_Main_PK_Col_List, v_Schema_Name, v_DURING_Table_Name
 	);
 
@@ -1143,8 +1073,8 @@ BEGIN
 	);
 	
 	--3.) select from main DURING table
-	EXECUTE format(
-		'CREATE TEMPORARY TABLE QUERY2 AS (SELECT %s, DURING FROM %I.%I AS T1 UNION %s)'
+	v_Main_DURING_Table_Rows:=format(
+		'SELECT %s, DURING FROM %I.%I AS T1 UNION %s'
 		, v_Main_PK_Col_List, v_Schema_Name, v_Main_DURING_Table_Name, v_Main_SINCE_Table_Rows
 	);
 
@@ -1155,26 +1085,24 @@ BEGIN
 				SELECT SUB1.*
 				FROM (
 					SELECT %s, TEMPORAL.EXPAND(ARRAY_AGG(DURING)) AS DURING
-					FROM QUERY1 
+					FROM (%s) AS QUERY1 
 					GROUP BY %s
 				) SUB1
 			) EXCEPT (
 				SELECT SUB2.*
 				FROM (
 					SELECT %s, TEMPORAL.EXPAND(ARRAY_AGG(DURING)) AS DURING
-					FROM QUERY2
+					FROM (%s) AS QUERY2
 					GROUP BY %s
 				) SUB2
 			)
 		) RES
-	',v_Main_PK_Col_List,v_Main_PK_Col_List,v_Main_PK_Col_List,v_Main_PK_Col_List) INTO v_Record;
+	',v_Main_PK_Col_List,v_DURING_Table_Rows,v_Main_PK_Col_List,v_Main_PK_Col_List,v_Main_DURING_Table_Rows,v_Main_PK_Col_List) INTO v_Record;
 
 	IF v_Record.Error_Cnt>0 THEN
 	    RAISE EXCEPTION 'Entity and its reference table have some gaps in their relationship: %', v_DURING_Table_Name;
 	END IF;
 
-	DROP TABLE QUERY1;
-	DROP TABLE QUERY2;
 	RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
@@ -1322,7 +1250,7 @@ BEGIN
 				Foreign_Column_Name, 
 				UNNEST(Property_Column_List) AS Temporal_Meta_Column, 
 				Since_Column_Name AS FK_Since_Col_Name
-			FROM TEMPORAL.TMP_FK_METADATA
+			FROM TMP_FK_METADATA
 			WHERE Column_Name=Foreign_Column_Name
 		) SUB
 		WHERE Foreign_Column_Name=Temporal_Meta_Column
@@ -1342,7 +1270,6 @@ BEGIN
 	RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
-
 CREATE OR REPLACE FUNCTION TEMPORAL.CHK_WHEN_UNPACKED_THEN_KEY() RETURNS TRIGGER AS $$
 DECLARE
 	v_Query_Statement TEXT;
