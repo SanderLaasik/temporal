@@ -497,7 +497,7 @@ CREATE OR REPLACE FUNCTION TEMPORAL.TEMPORAL_UNION(
 		FROM (
 			SELECT '||v_Select_List||Range_Column||' AS '||Range_Column||'
 			FROM INPUT_TEMP1 
-			UNION
+			UNION ALL
 			SELECT '||v_Select_List||Range_Column||' AS '||Range_Column||'
 			FROM INPUT_TEMP2
 		) SUB
@@ -553,7 +553,7 @@ BEGIN
 		CREATE OR REPLACE VIEW %s.%s AS (
 			SELECT %s, CAST(''[''||%s||'',INFINITY)'' AS DATERANGE) AS DURING
 			FROM %s.%s
-			UNION
+			UNION ALL
 			SELECT %s, DURING
 			FROM %s.%s
 		);', In_Schema_Name, In_Combining_View_Name, In_Hist_Col_List, In_Since_Name, In_Schema_Name, In_Table_Name, In_Hist_Col_List, In_Schema_Name, In_Hist_Table_Name
@@ -1007,7 +1007,7 @@ BEGIN
 	
 	--2.) select from main DURING table
 	v_Main_DURING_Table_Rows:= format(
-		'SELECT %s, DURING FROM %I.%I AS T1 UNION %s'
+		'SELECT %s, DURING FROM %I.%I AS T1 UNION ALL %s'
 		, v_Main_PK_Col_List, v_Schema_Name, v_Main_DURING_Table_Name, v_SINCE_Table_Rows
 	);
 
@@ -1074,7 +1074,7 @@ BEGIN
 	
 	--3.) select from main DURING table
 	v_Main_DURING_Table_Rows:=format(
-		'SELECT %s, DURING FROM %I.%I AS T1 UNION %s'
+		'SELECT %s, DURING FROM %I.%I AS T1 UNION ALL %s'
 		, v_Main_PK_Col_List, v_Schema_Name, v_Main_DURING_Table_Name, v_Main_SINCE_Table_Rows
 	);
 
